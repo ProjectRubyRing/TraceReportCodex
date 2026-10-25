@@ -1,0 +1,20 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "QueryTransactionSpans",
+      "Effect": "Allow",
+      "Action": [
+        "logs:StartQuery",
+        "logs:GetQueryResults"
+      ],
+      "Resource": "arn:aws:logs:REGION:ACCOUNT_ID:log-group:aws/spans:*"
+    },
+    {
+      "Sid": "CancelOwnRunningQueryOnExit",
+      "Effect": "Allow",
+      "Action": "logs:StopQuery",
+      "Resource": "*"
+    }
+  ]
+}

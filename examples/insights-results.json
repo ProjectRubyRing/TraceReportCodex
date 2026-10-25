@@ -1,0 +1,136 @@
+{
+  "status": "Complete",
+  "results": [
+    [
+      {
+        "field": "@timestamp",
+        "value": "2026-10-26 00:00:03.000"
+      },
+      {
+        "field": "@message",
+        "value": "{\"traceId\":\"69000000777777778888888899999999\",\"spanId\":\"0000000000000009\",\"parentSpanId\":\"00000000000003e7\",\"name\":\"親スパンが範囲外の処理\",\"kind\":\"SERVER\",\"startTimeUnixNano\":1792972803000000123,\"endTimeUnixNano\":1792972803250000123,\"durationNano\":250000000,\"resource\":{\"attributes\":{\"service.name\":\"worker-service\",\"deployment.environment.name\":\"sample\"}},\"attributes\":{\"aws.local.service\":\"worker-service\",\"http.request.method\":\"POST\",\"http.response.status_code\":429},\"status\":{\"code\":\"ERROR\"}}"
+      },
+      {
+        "field": "@ptr",
+        "value": "sample-9"
+      }
+    ],
+    [
+      {
+        "field": "@timestamp",
+        "value": "2026-10-26 00:00:02.005"
+      },
+      {
+        "field": "@message",
+        "value": "{\"traceId\":\"69000000444444445555555566666666\",\"spanId\":\"0000000000000008\",\"parentSpanId\":\"0000000000000007\",\"name\":\"ヘルスチェック\",\"kind\":\"SERVER\",\"startTimeUnixNano\":1792972802005000123,\"endTimeUnixNano\":1792972802025000123,\"durationNano\":20000000,\"resource\":{\"attributes\":{\"service.name\":\"health-service\",\"deployment.environment.name\":\"sample\"}},\"attributes\":{\"aws.local.service\":\"health-service\",\"http.request.method\":\"POST\",\"http.response.status_code\":200},\"status\":{\"code\":\"OK\"}}"
+      },
+      {
+        "field": "@ptr",
+        "value": "sample-8"
+      }
+    ],
+    [
+      {
+        "field": "@timestamp",
+        "value": "2026-10-26 00:00:02.000"
+      },
+      {
+        "field": "@message",
+        "value": "{\"traceId\":\"69000000444444445555555566666666\",\"spanId\":\"0000000000000007\",\"parentSpanId\":\"\",\"name\":\"GET /health\",\"kind\":\"SERVER\",\"startTimeUnixNano\":1792972802000000123,\"endTimeUnixNano\":1792972802040000123,\"durationNano\":40000000,\"resource\":{\"attributes\":{\"service.name\":\"web-gateway\",\"deployment.environment.name\":\"sample\"}},\"attributes\":{\"aws.local.service\":\"web-gateway\",\"http.request.method\":\"POST\",\"http.response.status_code\":200},\"status\":{\"code\":\"OK\"}}"
+      },
+      {
+        "field": "@ptr",
+        "value": "sample-7"
+      }
+    ],
+    [
+      {
+        "field": "@timestamp",
+        "value": "2026-10-26 00:00:01.100"
+      },
+      {
+        "field": "@message",
+        "value": "{\"traceId\":\"69000000111111112222222233333333\",\"spanId\":\"0000000000000006\",\"parentSpanId\":\"0000000000000002\",\"name\":\"在庫照会\",\"kind\":\"SERVER\",\"startTimeUnixNano\":1792972801100000123,\"endTimeUnixNano\":1792972801250000123,\"durationNano\":150000000,\"resource\":{\"attributes\":{\"service.name\":\"inventory-service\",\"deployment.environment.name\":\"sample\"}},\"attributes\":{\"aws.local.service\":\"inventory-service\",\"http.request.method\":\"POST\",\"http.response.status_code\":200},\"status\":{\"code\":\"OK\"}}"
+      },
+      {
+        "field": "@ptr",
+        "value": "sample-6"
+      }
+    ],
+    [
+      {
+        "field": "@timestamp",
+        "value": "2026-10-26 00:00:00.200"
+      },
+      {
+        "field": "@message",
+        "value": "{\"traceId\":\"69000000111111112222222233333333\",\"spanId\":\"0000000000000005\",\"parentSpanId\":\"0000000000000004\",\"name\":\"SELECT inventory\",\"kind\":\"CLIENT\",\"startTimeUnixNano\":1792972800200000123,\"endTimeUnixNano\":1792972800320000123,\"durationNano\":120000000,\"resource\":{\"attributes\":{\"service.name\":\"payment-service\",\"deployment.environment.name\":\"sample\"}},\"attributes\":{\"aws.local.service\":\"payment-service\",\"http.request.method\":\"POST\",\"http.response.status_code\":200,\"db.system.name\":\"postgresql\",\"db.namespace\":\"sample_inventory\"},\"status\":{\"code\":\"OK\"}}"
+      },
+      {
+        "field": "@ptr",
+        "value": "sample-5"
+      }
+    ],
+    [
+      {
+        "field": "@timestamp",
+        "value": "2026-10-26 00:00:00.150"
+      },
+      {
+        "field": "@message",
+        "value": "{\"traceId\":\"69000000111111112222222233333333\",\"spanId\":\"0000000000000004\",\"parentSpanId\":\"0000000000000003\",\"name\":\"決済処理\",\"kind\":\"SERVER\",\"startTimeUnixNano\":1792972800150000123,\"endTimeUnixNano\":1792972800950000123,\"durationNano\":800000000,\"resource\":{\"attributes\":{\"service.name\":\"payment-service\",\"deployment.environment.name\":\"sample\"}},\"attributes\":{\"aws.local.service\":\"payment-service\",\"http.request.method\":\"POST\",\"http.response.status_code\":500},\"status\":{\"code\":\"ERROR\"},\"events\":[{\"name\":\"exception\",\"attributes\":{\"exception.type\":\"ExampleTimeout\",\"exception.message\":\"合成データ: 接続タイムアウト\"}}]}"
+      },
+      {
+        "field": "@ptr",
+        "value": "sample-4"
+      }
+    ],
+    [
+      {
+        "field": "@timestamp",
+        "value": "2026-10-26 00:00:00.100"
+      },
+      {
+        "field": "@message",
+        "value": "{\"traceId\":\"69000000111111112222222233333333\",\"spanId\":\"0000000000000003\",\"parentSpanId\":\"0000000000000002\",\"name\":\"POST payment\",\"kind\":\"CLIENT\",\"startTimeUnixNano\":1792972800100000123,\"endTimeUnixNano\":1792972801000000123,\"durationNano\":900000000,\"resource\":{\"attributes\":{\"service.name\":\"order-service\",\"deployment.environment.name\":\"sample\"}},\"attributes\":{\"aws.local.service\":\"order-service\",\"http.request.method\":\"POST\",\"http.response.status_code\":500,\"aws.remote.service\":\"payment-service\"},\"status\":{\"code\":\"ERROR\"},\"events\":[{\"name\":\"exception\",\"attributes\":{\"exception.type\":\"ExampleTimeout\",\"exception.message\":\"合成データ: 接続タイムアウト\"}}]}"
+      },
+      {
+        "field": "@ptr",
+        "value": "sample-3"
+      }
+    ],
+    [
+      {
+        "field": "@timestamp",
+        "value": "2026-10-26 00:00:00.020"
+      },
+      {
+        "field": "@message",
+        "value": "{\"traceId\":\"69000000111111112222222233333333\",\"spanId\":\"0000000000000002\",\"parentSpanId\":\"0000000000000001\",\"name\":\"注文処理\",\"kind\":\"SERVER\",\"startTimeUnixNano\":1792972800020000123,\"endTimeUnixNano\":1792972801270000123,\"durationNano\":1250000000,\"resource\":{\"attributes\":{\"service.name\":\"order-service\",\"deployment.environment.name\":\"sample\"}},\"attributes\":{\"aws.local.service\":\"order-service\",\"http.request.method\":\"POST\",\"http.response.status_code\":500},\"status\":{\"code\":\"ERROR\"},\"events\":[{\"name\":\"exception\",\"attributes\":{\"exception.type\":\"ExampleTimeout\",\"exception.message\":\"合成データ: 接続タイムアウト\"}}]}"
+      },
+      {
+        "field": "@ptr",
+        "value": "sample-2"
+      }
+    ],
+    [
+      {
+        "field": "@timestamp",
+        "value": "2026-10-26 00:00:00.000"
+      },
+      {
+        "field": "@message",
+        "value": "{\"traceId\":\"69000000111111112222222233333333\",\"spanId\":\"0000000000000001\",\"parentSpanId\":\"\",\"name\":\"POST /checkout\",\"kind\":\"SERVER\",\"startTimeUnixNano\":1792972800000000123,\"endTimeUnixNano\":1792972801400000123,\"durationNano\":1400000000,\"resource\":{\"attributes\":{\"service.name\":\"web-gateway\",\"deployment.environment.name\":\"sample\"}},\"attributes\":{\"aws.local.service\":\"web-gateway\",\"http.request.method\":\"POST\",\"http.response.status_code\":500},\"status\":{\"code\":\"ERROR\"},\"events\":[{\"name\":\"exception\",\"attributes\":{\"exception.type\":\"ExampleTimeout\",\"exception.message\":\"合成データ: 接続タイムアウト\"}}]}"
+      },
+      {
+        "field": "@ptr",
+        "value": "sample-1"
+      }
+    ]
+  ],
+  "statistics": {
+    "recordsMatched": 9,
+    "recordsScanned": 9,
+    "bytesScanned": 8192
+  }
+}

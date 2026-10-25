@@ -64,6 +64,8 @@ bash bin/trace-report.sh \
 
 | オプション | 既定値 | 内容 |
 | --- | --- | --- |
+| `--switchback-mode` | `warn` | AWSの認証・権限エラー時に警告して終了する `warn`、または専用シェルをsourceする `auto` |
+| `--switchback-script` | なし | sourceする専用Bashシェルのパス。AWS接続時の `auto` では必須 |
 | `--log-group` | `aws/spans` | 取得対象のロググループ名 |
 | `--template` | 付属テンプレート | 同じ配置契約を持つ `.xlsx` |
 | `--query-limit` | `10000` | クエリごとの結果上限。2〜100000 |
@@ -71,6 +73,36 @@ bash bin/trace-report.sh \
 | `--timeout` | `900` | 1クエリの開始・完了待ち・ページ取得の待機期限、秒 |
 | `--max-queries` | `1000` | 分割前のクエリも含む発行数の上限 |
 | `--from-results` | なし | AWSに接続せず保存済み応答から生成 |
+
+## AWS操作権限不足時のスイッチバック
+
+本ツールはCodeCommit操作を行いません。CodeCommit用の認証状態などで実行し、CloudWatch Logsのクエリ開始・完了確認・ページ取得で認証または権限エラーが返ると、スイッチバックを案内します。追加の権限確認APIは呼び出さず、実際に必要な操作のエラーで判定します。
+
+既定の `--switchback-mode warn` は、標準エラーに警告を表示し、失敗したAWS CLIの終了コードで終了します。別チームが用意した専用シェルを手動で `source` し、同じコマンドを再実行してください。`--switchback-script FILE` も指定すると、警告にそのファイルをsourceするコマンドを表示します。
+
+自動でスイッチバックして続行する場合は、`--switchback-mode auto` と専用シェルの配置場所を指定します。
+
+```bash
+bash bin/trace-report.sh \
+  --start '2026-10-26T09:00:00+09:00' \
+  --end '2026-10-26T10:00:00+09:00' \
+  --region ap-northeast-1 \
+  --switchback-mode auto \
+  --switchback-script '/opt/team/aws roles/switchback.sh' \
+  --output-dir ./outputs/report-with-switchback
+```
+
+専用シェルのインターフェースは次のとおりです。
+
+- Bashから引数なしで `source` できるファイルを指定します。相対パスは起動時の作業ディレクトリを基準に解決します。読み取り権限が必要です。
+- シェルは必要な認証環境変数を `export` / `unset` するなどして更新し、成功時は0、失敗時は非0を返してください。非対話で制御を戻し、`exit` / `exec` や呼び出し側のトラップの置き換えは行わない契約です。
+- 同じBashプロセス内でsourceするため、更新した認証環境は再試行、後続のAWS操作、終了時のクエリ停止に引き継がれます。認証環境の変更範囲はレポート実行中のBashプロセスです。シェルの標準出力は標準エラーに流し、作業ディレクトリはsource前の場所へ戻します。
+
+自動sourceは実行全体で最大1回です。成功後に失敗したAWS操作を同じ引数で1回再試行します。source失敗時はその終了コードで終了し、再試行後や後続操作で再び認証・権限エラーになった場合も終了します。API通信のリトライ設定は引き続きAWS CLIが管理し、sourceの所要時間もクエリの `--timeout` に含めます。終了処理中の `StopQuery` では新たなスイッチバックを始めません。
+
+対象は `AccessDenied` / `AccessDeniedException`、`ExpiredToken` などの認証・権限エラー、認証情報の未設定・不完全な設定、SSOセッションの期限切れです。通信障害、スロットリング、対象ロググループの不存在、引数エラーではスイッチバックを実行しません。`--from-results` では専用シェルの存在確認もsourceも行いません。
+
+`--profile` を指定した場合、その値はスイッチバック後も維持します。専用シェルが `AWS_PROFILE` を切り替える方式なら、`--profile` を省略して起動してください。AWS CLIの `--profile` は `AWS_PROFILE` より優先されます（[AWS公式の環境変数と優先順位](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-envvars.html)）。`--region` で指定した検索先も維持します。
 
 ## 出力とExcelの見方
 
@@ -160,9 +192,9 @@ bash tests/run.sh
 
 オフライン入力は、`status=Complete`、`nextToken` がない、件数が `--query-limit` 未満、`recordsMatched` が返却件数以下のGetQueryResults応答だけを受け付けます。スナップショットから欠落ページを補完できないためです。
 
-テストには日時境界、ナノ秒精度、ステータス、親欠落・循環・深い階層、CSV、Excelの値と型、重複・不正入力の検証があります。Linuxのシェル結合テストではローカルの偽AWS CLIを使用し、完了待ち、ページ取得、上限での分割、空結果、タイムアウト、失敗時の停止を確認します。AWS認証情報やネットワーク接続は使いません。
+テストには日時境界、ナノ秒精度、ステータス、親欠落・循環・深い階層、CSV、Excelの値と型、重複・不正入力の検証があります。Linuxのシェル結合テストではローカルの偽AWS CLIを使用し、完了待ち、ページ取得、上限での分割、空結果、タイムアウト、失敗時の停止に加え、スイッチバックの警告・自動source・認証環境の引き継ぎ・再試行回数の上限を確認します。AWS認証情報やネットワーク接続は使いません。
 
-この実装を作成したWindows環境では、Pythonテスト21件とShellCheck 0.11.0が成功しました。Linuxのシェル結合テスト12件は環境条件によりスキップしています。RHEL 9.8実機、実AWSへの接続、Microsoft Excel本体での表示は未検証です。RHELで上記の `bash tests/run.sh` とオフライン実行を確認した後、実際のスパンで検索してください。
+Windows環境では、Pythonテスト21件とShellCheck 0.11.0が成功しました。Linuxのシェル結合テスト27件は環境条件によりスキップしています。RHEL 9.8実機、実AWSへの接続、別チーム提供の実際のスイッチバックシェル、Microsoft Excel本体での表示は未検証です。RHELで上記の `bash tests/run.sh` とオフライン実行を確認した後、実際のスパンで検索してください。
 
 ## 開発時のテンプレート再生成
 
@@ -181,3 +213,5 @@ python3 tools/package_release.py
 - [GetQueryResults: 完了状態・ページ取得・統計](https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_GetQueryResults.html)
 - [CloudWatchのスパンのクエリ例](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/GettingSetup.html)
 - [CloudWatch Logsのアクションと権限範囲](https://docs.aws.amazon.com/service-authorization/latest/reference/list_logs.html)
+- [AWS CLIの終了コード](https://docs.aws.amazon.com/cli/latest/topic/return-codes.html)
+- [AWS CLIの認証・権限エラー](https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-troubleshooting.html)

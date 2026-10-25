@@ -16,6 +16,8 @@ The selected log-event timestamp interval is [start, end), in UTC.
   --region REGION        AWS region (required, including offline mode)
   --output-dir DIR       New output directory; an existing path is never overwritten
   --profile NAME         AWS CLI profile (otherwise use the normal credential chain)
+  --switchback-mode MODE warn: advise and exit on AWS auth errors (default); auto: source and retry
+  --switchback-script FILE  Team-provided Bash shell to source; required for live auto mode
   --log-group NAME       Default: aws/spans
   --trace-id ID          Optional 32-hex or X-Ray trace ID; includes both ID formats
   --template FILE        Compatible XLSX template; default: templates/trace-report.xlsx
@@ -46,6 +48,7 @@ project_dir=$(cd -- "$script_dir/.." && pwd -P)
 helper="$project_dir/lib/report.py"
 template="$project_dir/templates/trace-report.xlsx"
 start='' end='' region='' output_dir='' profile='' trace_id='' from_results=''
+switchback_mode=warn switchback_script='' switchback_attempted=0
 log_group='aws/spans'
 query_limit=10000 poll_interval=2 timeout=900 max_queries=1000
 
@@ -56,6 +59,8 @@ while (( $# )); do
     --region) need_value "$@"; region=$2; shift 2 ;;
     --output-dir) need_value "$@"; output_dir=$2; shift 2 ;;
     --profile) need_value "$@"; profile=$2; shift 2 ;;
+    --switchback-mode) need_value "$@"; switchback_mode=$2; shift 2 ;;
+    --switchback-script) need_value "$@"; switchback_script=$2; shift 2 ;;
     --log-group) need_value "$@"; log_group=$2; shift 2 ;;
     --trace-id) need_value "$@"; trace_id=$2; shift 2 ;;
     --template) need_value "$@"; template=$2; shift 2 ;;
@@ -76,6 +81,13 @@ integer_option --query-limit "$query_limit" 2 100000
 integer_option --poll-interval "$poll_interval" 1 60
 integer_option --timeout "$timeout" 1 86400
 integer_option --max-queries "$max_queries" 1 1000000
+case $switchback_mode in
+  warn|auto) ;;
+  *) die '--switchback-mode must be warn or auto' ;;
+esac
+if [[ -z $from_results && $switchback_mode == auto && -z $switchback_script ]]; then
+  die '--switchback-mode auto requires --switchback-script FILE'
+fi
 for dependency in python3 jq realpath mktemp mv; do
   command -v "$dependency" >/dev/null || die "Required command not found: $dependency"
 done
@@ -90,6 +102,10 @@ fi
 if [[ -n $from_results ]]; then
   [[ -r $from_results ]] || die 'Cannot read --from-results file'
 else
+  if [[ -n $switchback_script ]]; then
+    [[ -f $switchback_script && -r $switchback_script ]] || die '--switchback-script must be a readable file'
+    switchback_script=$(realpath -e -- "$switchback_script")
+  fi
   command -v aws >/dev/null || die 'AWS CLI v2 is required'
   aws_version=$(aws --version 2>&1)
   [[ $aws_version == aws-cli/2.* ]] || die 'AWS CLI v2 is required'
@@ -106,10 +122,71 @@ aws_args=(--region "$region" --output json --no-cli-pager --no-paginate --cli-co
 export AWS_PAGER='' AWS_CLI_AUTO_PROMPT=off
 export AWS_RETRY_MODE="${AWS_RETRY_MODE:-standard}" AWS_MAX_ATTEMPTS="${AWS_MAX_ATTEMPTS:-5}"
 
+aws_auth_error() {
+  local message pattern
+  message=$(< "$1")
+  # A CLI exit code alone also covers service/configuration errors unrelated to IAM.
+  pattern='An error occurred \((AccessDenied(Exception)?|UnauthorizedOperation|UnauthorizedException|ForbiddenException|UnrecognizedClientException|InvalidClientTokenId|InvalidAccessKeyId|ExpiredToken(Exception)?|SignatureDoesNotMatch|InvalidSignatureException)\)'
+  [[ $message =~ $pattern || $message == *'Unable to locate credentials'* ||
+     $message == *'Partial credentials found'* || $message == *'Token has expired and refresh failed'* ||
+     $message == *'The SSO session associated with this profile has expired or is otherwise invalid'* ]]
+}
+
+perform_switchback() {
+  local switchback_status=0 switchback_directory=$PWD
+  switchback_attempted=1
+  log 'AWS authentication/authorization failed; sourcing --switchback-script for switchback'
+  # Source in this process, with no positional arguments, so exported credentials
+  # persist for the retry, later queries and cleanup. Script output is not API JSON.
+  # shellcheck disable=SC1090
+  source "$switchback_script" >&2 || switchback_status=$?
+  set -Eeuo pipefail
+  umask 077
+  cd -- "$switchback_directory" || die 'Could not restore working directory after switchback'
+  if (( switchback_status != 0 )); then
+    log "ERROR: Switchback script failed (exit $switchback_status); AWS operation was not retried"
+    return "$switchback_status"
+  fi
+  (( SECONDS < deadline )) || die 'Switchback exceeded the query --timeout'
+  log 'Retrying the failed AWS operation after switchback'
+}
+
+aws_call() {
+  local destination=$1 aws_status error_file="$work_dir/aws-error.txt"
+  shift
+  while :; do
+    # Overwrite failed stdout on retry rather than appending it to a valid response.
+    if aws "${aws_args[@]}" "$@" > "$destination" 2> "$error_file"; then
+      cat -- "$error_file" >&2
+      return 0
+    else
+      aws_status=$?
+    fi
+    cat -- "$error_file" >&2
+    aws_auth_error "$error_file" || return "$aws_status"
+    if [[ $switchback_mode == warn ]]; then
+      log 'WARNING: AWS authentication/authorization failed. Switchback is required before continuing.'
+      if [[ -n $switchback_script ]]; then
+        printf 'WARNING: Run: source %q; then rerun this command.\n' "$switchback_script" >&2
+      else
+        log 'WARNING: Source your team-provided switchback shell, then rerun this command.'
+      fi
+      log 'WARNING: For automatic switchback, use --switchback-mode auto --switchback-script FILE.'
+      return "$aws_status"
+    fi
+    if (( switchback_attempted )); then
+      log 'ERROR: AWS authentication/authorization still fails after switchback; no further switchback will be attempted.'
+      return "$aws_status"
+    fi
+    perform_switchback
+  done
+}
+
 cleanup() {
   local status=$?
   trap - EXIT
   if [[ -n $active_query ]]; then
+    # Cleanup also runs on cancellation: do not start a new switchback while exiting.
     if ! aws "${aws_args[@]}" logs stop-query --query-id "$active_query" >/dev/null; then
       log "WARNING: Could not stop query $active_query; check it in CloudWatch Logs Insights"
     fi
@@ -161,14 +238,14 @@ else
     query+=' | sort @timestamp asc'
     log "Query $query_count: [$lo, $hi) epoch milliseconds"
     deadline=$(( SECONDS + timeout ))
-    aws "${aws_args[@]}" logs start-query --log-group-name "$log_group" \
+    aws_call "$work_dir/start.json" logs start-query --log-group-name "$log_group" \
       --start-time "$(( lo / 1000 ))" --end-time "$(( (hi + 999) / 1000 ))" \
-      --limit "$query_limit" --query-string "$query" > "$work_dir/start.json"
+      --limit "$query_limit" --query-string "$query"
     active_query=$(jq -er '.queryId | select(type == "string" and length > 0)' "$work_dir/start.json")
     response="$work_dir/page.json"
     while :; do
       (( SECONDS < deadline )) || die "Query $active_query exceeded --timeout"
-      aws "${aws_args[@]}" logs get-query-results --query-id "$active_query" > "$response"
+      aws_call "$response" logs get-query-results --query-id "$active_query"
       status=$(jq -er '.status | select(type == "string")' "$response")
       case $status in
         Complete) break ;;
@@ -202,7 +279,7 @@ else
       # JSON input keeps opaque tokens out of shell interpolation and supports the
       # API nextToken separately from the AWS CLI's own pagination switches.
       request=$(jq -cn --arg id "$completed_query" --arg token "$token" '{queryId: $id, nextToken: $token}')
-      aws "${aws_args[@]}" logs get-query-results --cli-input-json "$request" > "$response"
+      aws_call "$response" logs get-query-results --cli-input-json "$request"
     done
     split=$(jq -r --argjson rows "$rows" --argjson cap "$query_limit" \
       '$rows >= $cap or ((.statistics.recordsMatched // $rows) > $rows)' "$work_dir/complete.json")

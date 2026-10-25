@@ -26,18 +26,27 @@ class ShellIntegrationTests(unittest.TestCase):
         mock.chmod(0o755)
         self.state_file = self.directory / "state.json"
         self.output = self.directory / "output with spaces"
+        self.switchback_script = self.directory / "switch back's $config [1].sh"
+        self.switchback_log = self.directory / "switchback.log"
 
     def tearDown(self):
         resolved = self.directory.resolve()
         if resolved.parent == (ROOT / ".work").resolve() and resolved.name.startswith("shell-test-"):
             shutil.rmtree(resolved)
 
-    def run_report(self, scenario="normal", records=None, extra=None, expected=0):
-        state = {"scenario": scenario, "records": sample_records() if records is None else records}
+    def write_switchback(self, body="export FAKE_AWS_SWITCHED_BACK=1\n"):
+        self.switchback_script.write_text('printf "sourced\\n" >> "$FAKE_AWS_SWITCHBACK_LOG"\n' + body, encoding="utf-8")
+        self.switchback_script.chmod(0o600)  # source needs read permission, not execute permission.
+        return ["--switchback-mode", "auto", "--switchback-script", str(self.switchback_script)]
+
+    def run_report(self, scenario="normal", records=None, extra=None, expected=0, failures=None):
+        state = {"scenario": scenario, "records": sample_records() if records is None else records, "failures": failures or []}
         self.state_file.write_text(json.dumps(state), encoding="utf-8")
         environment = os.environ.copy()
         environment["PATH"] = str(self.mock_bin) + os.pathsep + environment["PATH"]
         environment["FAKE_AWS_STATE"] = str(self.state_file)
+        environment["FAKE_AWS_SWITCHED_BACK"] = "0"
+        environment["FAKE_AWS_SWITCHBACK_LOG"] = str(self.switchback_log)
         command = ["bash", str(ROOT / "bin/trace-report.sh"), "--start", str(BASE), "--end", str(BASE + 4),
                    "--region", "ap-northeast-1", "--output-dir", str(self.output), "--poll-interval", "1"]
         result = subprocess.run(command + (extra or []), env=environment, capture_output=True, text=True, timeout=30)
@@ -102,8 +111,144 @@ class ShellIntegrationTests(unittest.TestCase):
         self.assertIn("Repeated pagination token", result.stderr)
 
     def test_access_denied_is_not_retried_forever(self):
-        _, state = self.run_report("denied", expected=254)
+        result, state = self.run_report("denied", expected=254)
         self.assertEqual(len(state["calls"]), 1)
+        self.assertIn("WARNING", result.stderr)
+        self.assertIn("switchback", result.stderr.lower())
+
+    def test_warn_mode_recommends_source_without_running_it(self):
+        self.write_switchback()
+        result, state = self.run_report("denied", extra=["--switchback-mode", "warn", "--switchback-script",
+                                                        str(self.switchback_script)], expected=254)
+        self.assertIn("source ", result.stderr)
+        self.assertIn("--switchback-mode auto", result.stderr)
+        self.assertEqual(len(state["calls"]), 1)
+        self.assertFalse(self.switchback_log.exists())
+
+    def test_authentication_errors_recommend_switchback(self):
+        errors = [(f"An error occurred ({code}) when calling the StartQuery operation: Mock error", 254)
+                  for code in ("AccessDenied", "UnauthorizedOperation", "UnauthorizedException", "ForbiddenException",
+                               "UnrecognizedClientException", "InvalidClientTokenId", "InvalidAccessKeyId",
+                               "ExpiredToken", "ExpiredTokenException", "SignatureDoesNotMatch", "InvalidSignatureException")]
+        errors += [("Unable to locate credentials. You can configure credentials by running aws configure.", 253),
+                   ("Partial credentials found in env, missing: AWS_SECRET_ACCESS_KEY", 255),
+                   ("Error when retrieving token from sso: Token has expired and refresh failed", 255),
+                   ("The SSO session associated with this profile has expired or is otherwise invalid", 255)]
+        for message, status in errors:
+            with self.subTest(message=message):
+                result, state = self.run_report(expected=status, failures=[{"action": "start-query", "message": message,
+                                                                           "status": status}])
+                self.assertIn("WARNING", result.stderr)
+                self.assertIn("switchback", result.stderr.lower())
+                self.assertEqual(len(state["calls"]), 1)
+
+    def test_auto_switchback_retries_with_sourced_environment(self):
+        metadata, state = self.run_report(extra=self.write_switchback(), failures=[{"action": "start-query"}])
+        self.assertEqual(metadata["span_count"], 9)
+        self.assertEqual([call["action"] for call in state["calls"]], ["start-query", "start-query", "get-query-results"])
+        self.assertEqual([call["switched_back"] for call in state["calls"]], [False, True, True])
+        self.assertEqual(self.switchback_log.read_text(encoding="utf-8"), "sourced\n")
+
+    def test_auto_switchback_during_polling_keeps_the_query(self):
+        metadata, state = self.run_report(extra=self.write_switchback(), failures=[{"action": "get-query-results"}])
+        self.assertEqual(metadata["span_count"], 9)
+        self.assertEqual(len(state["queries"]), 1)
+        self.assertEqual([call["action"] for call in state["calls"]], ["start-query", "get-query-results", "get-query-results"])
+        self.assertEqual(state["calls"][1]["args"], state["calls"][2]["args"])
+
+    def test_auto_switchback_during_pagination_keeps_the_page(self):
+        metadata, state = self.run_report("paginate", extra=self.write_switchback(),
+                                          failures=[{"action": "get-query-results", "paginated": True}])
+        self.assertEqual(metadata["span_count"], 9)
+        self.assertEqual(metadata["queries"][0]["pages"], 2)
+        self.assertEqual(state["calls"][-2]["args"], state["calls"][-1]["args"])
+        self.assertFalse(state["calls"][-2]["switched_back"])
+        self.assertTrue(state["calls"][-1]["switched_back"])
+
+    def test_auto_switchback_runs_at_most_once_when_access_stays_denied(self):
+        result, state = self.run_report("denied", extra=self.write_switchback(), expected=254)
+        self.assertEqual(len(state["calls"]), 2)
+        self.assertEqual(self.switchback_log.read_text(encoding="utf-8"), "sourced\n")
+        self.assertIn("after switchback", result.stderr)
+
+    def test_later_auth_failure_does_not_switchback_again(self):
+        result, state = self.run_report(extra=self.write_switchback(), expected=254,
+                                        failures=[{"action": "start-query"}, {"action": "get-query-results", "when": "after"}])
+        self.assertEqual([call["action"] for call in state["calls"]],
+                         ["start-query", "start-query", "get-query-results", "stop-query"])
+        self.assertEqual(self.switchback_log.read_text(encoding="utf-8"), "sourced\n")
+        self.assertTrue(state["calls"][-1]["switched_back"])
+        self.assertIn("after switchback", result.stderr)
+
+    def test_failed_switchback_stops_without_retrying_aws(self):
+        result, state = self.run_report(extra=self.write_switchback("set +e\nreturn 7\n"), expected=7,
+                                        failures=[{"action": "start-query"}])
+        self.assertIn("Switchback script failed", result.stderr)
+        self.assertEqual(len(state["calls"]), 1)
+        self.assertEqual(self.switchback_log.read_text(encoding="utf-8"), "sourced\n")
+
+    def test_source_output_and_directory_changes_do_not_break_report(self):
+        options = self.write_switchback('[[ $# -eq 0 ]] || return 9\nprintf "switchback progress\\n"\n'
+                                       'cd /\nset +e\nexport FAKE_AWS_SWITCHED_BACK=1\n')
+        options[-1] = os.path.relpath(self.switchback_script)
+        options += ["--template", os.path.relpath(ROOT / "templates/trace-report.xlsx"), "--profile", "reporting"]
+        metadata, state = self.run_report(extra=options, failures=[{"action": "start-query"}])
+        self.assertEqual(metadata["span_count"], 9)
+        for call in state["calls"]:
+            self.assertEqual(call["args"][call["args"].index("--profile") + 1], "reporting")
+
+    def test_auto_mode_does_not_source_when_aws_succeeds(self):
+        self.run_report(extra=self.write_switchback())
+        self.assertFalse(self.switchback_log.exists())
+
+    def test_switchback_timeout_does_not_retry_aws(self):
+        options = self.write_switchback("sleep 2\nexport FAKE_AWS_SWITCHED_BACK=1\n")
+        result, state = self.run_report(extra=options + ["--timeout", "1"], expected=1,
+                                        failures=[{"action": "start-query"}])
+        self.assertIn("--timeout", result.stderr)
+        self.assertEqual(len(state["calls"]), 1)
+
+    def test_cleanup_does_not_start_switchback_while_exiting(self):
+        result, state = self.run_report("failed", extra=self.write_switchback(), expected=1,
+                                        failures=[{"action": "stop-query", "when": "always"}])
+        self.assertEqual(state["calls"][-1]["action"], "stop-query")
+        self.assertIn("Could not stop query", result.stderr)
+        self.assertFalse(self.switchback_log.exists())
+
+    def test_non_authentication_errors_do_not_switchback(self):
+        options = self.write_switchback()
+        for message, status in [("Could not connect to the endpoint URL: https://logs.invalid", 255),
+                                ("An error occurred (ThrottlingException) when calling the StartQuery operation: slow down", 254),
+                                ("An error occurred (ResourceNotFoundException) when calling the StartQuery operation: "
+                                 "Log group AccessDeniedException does not exist", 254),
+                                ("Parameter validation failed: Invalid length for parameter queryString", 252)]:
+            with self.subTest(message=message):
+                result, state = self.run_report(extra=options, expected=status,
+                                                failures=[{"action": "start-query", "message": message, "status": status}])
+                self.assertIn(message, result.stderr)
+                self.assertEqual(len(state["calls"]), 1)
+                self.assertFalse(self.switchback_log.exists())
+
+    def test_switchback_options_are_validated_before_aws(self):
+        cases = [(["--switchback-mode", "invalid"], "--switchback-mode"),
+                 (["--switchback-mode"], "Missing value"),
+                 (["--switchback-script"], "Missing value"),
+                 (["--switchback-mode", "auto"], "--switchback-script"),
+                 (["--switchback-mode", "auto", "--switchback-script", str(self.switchback_script)], "--switchback-script"),
+                 (["--switchback-mode", "auto", "--switchback-script", str(self.directory)], "--switchback-script")]
+        for options, message in cases:
+            with self.subTest(options=options):
+                result, state = self.run_report(extra=options, expected=1)
+                self.assertIn(message, result.stderr)
+                self.assertEqual(state.get("calls", []), [])
+
+    def test_offline_mode_does_not_require_or_source_switchback_script(self):
+        options = ["--from-results", str(ROOT / "examples/insights-results.json"), "--switchback-mode", "auto",
+                   "--switchback-script", str(self.switchback_script)]
+        metadata, state = self.run_report(extra=options)
+        self.assertEqual(metadata["span_count"], 9)
+        self.assertEqual(state.get("calls", []), [])
+        self.assertFalse(self.switchback_log.exists())
 
     def test_offline_export_matches_live_export(self):
         metadata, state = self.run_report(extra=["--from-results", str(ROOT / "examples/insights-results.json")])

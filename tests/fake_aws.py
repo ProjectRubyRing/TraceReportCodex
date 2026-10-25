@@ -14,7 +14,8 @@ if args == ["--version"]:
 state_path = Path(os.environ["FAKE_AWS_STATE"])
 state = json.loads(state_path.read_text(encoding="utf-8"))
 action = args[args.index("logs") + 1]
-state.setdefault("calls", []).append({"action": action, "args": args})
+switched_back = os.environ.get("FAKE_AWS_SWITCHED_BACK") == "1"
+state.setdefault("calls", []).append({"action": action, "args": args, "switched_back": switched_back})
 
 
 def option(key):
@@ -27,9 +28,28 @@ def finish(value, status=0):
     sys.exit(status)
 
 
+failures = state.get("failures", [])
+if state.get("scenario") == "denied":
+    failures = [{"action": "start-query", "code": "AccessDeniedException", "when": "always"}]
+for failure in failures:
+    if action != failure["action"]:
+        continue
+    if failure.get("paginated") and "--cli-input-json" not in args:
+        continue
+    when = failure.get("when", "before")
+    if (when == "before" and switched_back) or (when == "after" and not switched_back):
+        continue
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    operation = {"start-query": "StartQuery", "get-query-results": "GetQueryResults", "stop-query": "StopQuery"}[action]
+    message = failure.get("message", f"An error occurred ({failure.get('code', 'AccessDeniedException')}) "
+                          f"when calling the {operation} operation: Mock AWS failure")
+    print(message, file=sys.stderr)
+    # Even an unsuccessful command's stdout must not contaminate a successful retry.
+    print("discard this failed response")
+    sys.exit(failure.get("status", 254))
+
+
 if action == "start-query":
-    if state.get("scenario") == "denied":
-        finish({"error": "AccessDeniedException"}, 254)
     query = option("--query-string")
     lo = int(re.search(r">= (\d+)", query).group(1))
     hi = int(re.search(r"< (\d+)", query).group(1))
